@@ -104,7 +104,7 @@ func main() {
 	}
 
 	// 初始化 dao 包
-	singleton.InitFrontendTemplates()
+	//singleton.InitFrontendTemplates() //diy 不编译不使用内部第三方主题，另外自己编译
 	singleton.InitConfigFromPath(dashboardCliParam.ConfigFile)
 	singleton.InitTimezoneAndCache()
 	singleton.InitDBFromPath(dashboardCliParam.DatabaseLocation)
