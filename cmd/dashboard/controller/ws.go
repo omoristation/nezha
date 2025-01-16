@@ -186,11 +186,11 @@ func getServerStat(withPublicNote, authorized bool) ([]byte, error) {
 				Host:         utils.IfOr(authorized, server.Host, server.Host.Filter()),
 				State:        server.State,
 				CountryCode:  countryCode,
-				Note:   utils.IfOr(withPublicNote, server.Note, ""), //diy 只第一个数据包有值
-				Ipv4:  ipv4, //diy
-				Ipv4Geo:  ipv4Geo, //diy
-				Ipv6:  ipv6, //diy
-				Ipv6Geo:  ipv6Geo, //diy
+				Note:         server.Note, //diy
+				Ipv4:         ipv4, //diy
+				Ipv4Geo:      ipv4Geo, //diy
+				Ipv6:         ipv6, //diy
+				Ipv6Geo:      ipv6Geo, //diy
 				LastActive:   server.LastActive,
 			})
 		}
