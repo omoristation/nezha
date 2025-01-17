@@ -25,7 +25,7 @@ var (
 	DashboardBootTime = uint64(time.Now().Unix())
 )
 
-//diy frontend-templates.yaml
+//go:embed frontend-templates.yaml
 var frontendTemplatesYAML []byte
 
 func InitTimezoneAndCache() {
