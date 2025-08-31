@@ -60,7 +60,15 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	api.POST("/login", authMiddleware.LoginHandler)
 	api.GET("/oauth2/:provider", commonHandler(oauth2redirect))
 
-	optionalAuth := api.Group("", optionalAuthMiddleware(authMiddleware))
+	fallbackAuthMw := fallbackAuthMiddleware(authMiddleware)
+	fallbackAuth := api.Group("", fallbackAuthMw)
+	fallbackAuth.GET("/setting", commonHandler(listConfig))
+	fallbackAuth.GET("/oauth2/callback", commonHandler(oauth2callback(authMiddleware)))
+
+	authMw := authMiddleware.MiddlewareFunc()
+	optionalAuthMw := utils.IfOr(singleton.Conf.ForceAuth, authMw, fallbackAuthMw)
+
+	optionalAuth := api.Group("", optionalAuthMw)
 	optionalAuth.GET("/ws/server", commonHandler(serverStream))
 	optionalAuth.GET("/server-group", commonHandler(listServerGroup))
 
@@ -68,11 +76,7 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 	optionalAuth.GET("/service/:id", commonHandler(listServiceHistory))
 	optionalAuth.GET("/service/server", commonHandler(listServerWithServices))
 
-	optionalAuth.GET("/oauth2/callback", commonHandler(oauth2callback(authMiddleware)))
-
-	optionalAuth.GET("/setting", commonHandler(listConfig))
-
-	auth := api.Group("", authMiddleware.MiddlewareFunc())
+	auth := api.Group("", authMw)
 
 	auth.GET("/refresh-token", authMiddleware.RefreshHandler)
 
@@ -106,7 +110,10 @@ func routers(r *gin.Engine, frontendDist fs.FS) {
 
 	auth.GET("/server", listHandler(listServer))
 	auth.PATCH("/server/:id", commonHandler(updateServer))
+	auth.GET("/server/config/:id", commonHandler(getServerConfig))
+	auth.POST("/server/config", commonHandler(setServerConfig))
 	auth.POST("/batch-delete/server", commonHandler(batchDeleteServer))
+	auth.POST("/batch-move/server", commonHandler(batchMoveServer))
 	auth.POST("/force-update/server", commonHandler(forceUpdateServer))
 
 	auth.GET("/notification", listHandler(listNotification))
@@ -169,10 +176,10 @@ type pHandlerFunc[S ~[]E, E any] func(c *gin.Context) (*model.Value[S], error)
 // gorm errors here instead
 type gormError struct {
 	msg string
-	a   []interface{}
+	a   []any
 }
 
-func newGormError(format string, args ...interface{}) error {
+func newGormError(format string, args ...any) error {
 	return &gormError{
 		msg: format,
 		a:   args,
@@ -185,10 +192,10 @@ func (ge *gormError) Error() string {
 
 type wsError struct {
 	msg string
-	a   []interface{}
+	a   []any
 }
 
-func newWsError(format string, args ...interface{}) error {
+func newWsError(format string, args ...any) error {
 	return &wsError{
 		msg: format,
 		a:   args,
@@ -216,7 +223,7 @@ func adminHandler[T any](handler handlerFunc[T]) func(*gin.Context) {
 		}
 
 		user := *auth.(*model.User)
-		if user.Role != model.RoleAdmin {
+		if !user.Role.IsAdmin() {
 			c.JSON(http.StatusOK, newErrorResponse(singleton.Localizer.ErrorT("permission denied")))
 			return
 		}

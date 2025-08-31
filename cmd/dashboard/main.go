@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -13,14 +15,15 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/gin-gonic/gin"
 	"github.com/ory/graceful"
 	"golang.org/x/crypto/bcrypt"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/nezhahq/nezha/cmd/dashboard/controller"
+	"github.com/nezhahq/nezha/cmd/dashboard/controller/waf"
 	"github.com/nezhahq/nezha/cmd/dashboard/rpc"
 	"github.com/nezhahq/nezha/model"
+	"github.com/nezhahq/nezha/pkg/utils"
 	"github.com/nezhahq/nezha/proto"
 	"github.com/nezhahq/nezha/service/singleton"
 )
@@ -37,38 +40,41 @@ var (
 	frontendDist embed.FS
 )
 
-func initSystem() {
+func initSystem(bus chan<- *model.Service) error {
 	// 初始化管理员账户
 	var usersCount int64
 	if err := singleton.DB.Model(&model.User{}).Count(&usersCount).Error; err != nil {
-		panic(err)
+		return err
 	}
 	if usersCount == 0 {
 		hash, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 		if err != nil {
-			panic(err)
+			return err
 		}
 		admin := model.User{
 			Username: "admin",
 			Password: string(hash),
 		}
 		if err := singleton.DB.Create(&admin).Error; err != nil {
-			panic(err)
+			return err
 		}
 	}
 
 	// 启动 singleton 包下的所有服务
-	singleton.LoadSingleton()
+	if err := singleton.LoadSingleton(bus); err != nil {
+		return err
+	}
 
 	// 每天的3:30 对 监控记录 和 流量记录 进行清理
-	if _, err := singleton.Cron.AddFunc("0 30 3 * * *", singleton.CleanServiceHistory); err != nil {
-		panic(err)
+	if _, err := singleton.CronShared.AddFunc("0 30 3 * * *", singleton.CleanServiceHistory); err != nil {
+		return err
 	}
 
 	// 每小时对流量记录进行打点
-	if _, err := singleton.Cron.AddFunc("0 0 * * * *", singleton.RecordTransferHourlyUsage); err != nil {
-		panic(err)
+	if _, err := singleton.CronShared.AddFunc("0 0 * * * *", func() { singleton.RecordTransferHourlyUsage() }); err != nil {
+		return err
 	}
+	return nil
 }
 
 // @title           Nezha Monitoring API
@@ -103,12 +109,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	serviceSentinelDispatchBus := make(chan *model.Service) // 用于传递服务监控任务信息的channel
 	// 初始化 dao 包
-	singleton.InitFrontendTemplates()
-	singleton.InitConfigFromPath(dashboardCliParam.ConfigFile)
-	singleton.InitTimezoneAndCache()
-	singleton.InitDBFromPath(dashboardCliParam.DatabaseLocation)
-	initSystem()
+	if err := utils.FirstError(singleton.InitFrontendTemplates,
+		func() error { return singleton.InitConfigFromPath(dashboardCliParam.ConfigFile) },
+		singleton.InitTimezoneAndCache,
+		func() error { return singleton.InitDBFromPath(dashboardCliParam.DatabaseLocation) },
+		func() error { return initSystem(serviceSentinelDispatchBus) }); err != nil {
+		log.Fatal(err)
+	}
 
 	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", singleton.Conf.ListenHost, singleton.Conf.ListenPort))
 	if err != nil {
@@ -116,37 +125,79 @@ func main() {
 	}
 
 	singleton.CleanServiceHistory()
-	serviceSentinelDispatchBus := make(chan model.Service) // 用于传递服务监控任务信息的channel
 	rpc.DispatchKeepalive()
 	go rpc.DispatchTask(serviceSentinelDispatchBus)
 	go singleton.AlertSentinelStart()
-	singleton.NewServiceSentinel(serviceSentinelDispatchBus)
 
 	grpcHandler := rpc.ServeRPC()
 	httpHandler := controller.ServeWeb(frontendDist)
 	controller.InitUpgrader()
 
 	muxHandler := newHTTPandGRPCMux(httpHandler, grpcHandler)
-	http2Server := &http2.Server{}
-	muxServer := &http.Server{Handler: h2c.NewHandler(muxHandler, http2Server), ReadHeaderTimeout: time.Second * 5}
+	muxServerHTTP := &http.Server{
+		Handler:           muxHandler,
+		ReadHeaderTimeout: time.Second * 5,
+	}
+	muxServerHTTP.Protocols = new(http.Protocols)
+	muxServerHTTP.Protocols.SetHTTP1(true)
+	muxServerHTTP.Protocols.SetUnencryptedHTTP2(true)
+
+	var muxServerHTTPS *http.Server
+	if singleton.Conf.HTTPS.ListenPort != 0 {
+		muxServerHTTPS = &http.Server{
+			Addr:              fmt.Sprintf("%s:%d", singleton.Conf.ListenHost, singleton.Conf.HTTPS.ListenPort),
+			Handler:           muxHandler,
+			ReadHeaderTimeout: time.Second * 5,
+			TLSConfig: &tls.Config{
+				InsecureSkipVerify: singleton.Conf.HTTPS.InsecureTLS,
+			},
+		}
+	}
+
+	errChan := make(chan error, 2)
+	errHTTPS := errors.New("error from https server")
 
 	if err := graceful.Graceful(func() error {
 		log.Printf("NEZHA>> Dashboard::START ON %s:%d", singleton.Conf.ListenHost, singleton.Conf.ListenPort)
-		return muxServer.Serve(l)
+		if singleton.Conf.HTTPS.ListenPort != 0 {
+			go func() {
+				errChan <- muxServerHTTPS.ListenAndServeTLS(singleton.Conf.HTTPS.TLSCertPath, singleton.Conf.HTTPS.TLSKeyPath)
+			}()
+			log.Printf("NEZHA>> Dashboard::START ON %s:%d", singleton.Conf.ListenHost, singleton.Conf.HTTPS.ListenPort)
+		}
+		go func() {
+			errChan <- muxServerHTTP.Serve(l)
+		}()
+		return <-errChan
 	}, func(c context.Context) error {
 		log.Println("NEZHA>> Graceful::START")
 		singleton.RecordTransferHourlyUsage()
 		log.Println("NEZHA>> Graceful::END")
-		return muxServer.Shutdown(c)
+		var err error
+		if muxServerHTTPS != nil {
+			err = muxServerHTTPS.Shutdown(c)
+		}
+		return errors.Join(muxServerHTTP.Shutdown(c), utils.IfOr(err != nil, utils.NewWrapError(errHTTPS, err), nil))
 	}); err != nil {
 		log.Printf("NEZHA>> ERROR: %v", err)
+		var wrapError *utils.WrapError
+		if errors.As(err, &wrapError) {
+			log.Printf("NEZHA>> ERROR HTTPS: %v", wrapError.Unwrap())
+		}
 	}
+
+	close(errChan)
 }
 
 func newHTTPandGRPCMux(httpHandler http.Handler, grpcHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		natConfig := singleton.GetNATConfigByDomain(r.Host)
+		natConfig := singleton.NATShared.GetNATConfigByDomain(r.Host)
 		if natConfig != nil {
+			if !natConfig.Enabled {
+				c, _ := gin.CreateTestContext(w)
+				waf.ShowBlockPage(c, fmt.Errorf("nat host %s is disabled", natConfig.Domain))
+				return
+			}
 			rpc.ServeNAT(w, r, natConfig)
 			return
 		}

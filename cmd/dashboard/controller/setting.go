@@ -17,43 +17,47 @@ import (
 // @Security BearerAuth
 // @Tags common
 // @Produce json
-// @Success 200 {object} model.CommonResponse[model.SettingResponse[model.Config]]
+// @Success 200 {object} model.CommonResponse[model.SettingResponse]
 // @Router /setting [get]
-func listConfig(c *gin.Context) (model.SettingResponse[any], error) {
+func listConfig(c *gin.Context) (*model.SettingResponse, error) {
 	u, authorized := c.Get(model.CtxKeyAuthorizedUser)
 	var isAdmin bool
 	if authorized {
 		user := u.(*model.User)
-		isAdmin = user.Role == model.RoleAdmin
+		isAdmin = user.Role.IsAdmin()
 	}
 
 	config := *singleton.Conf
-	config.Language = strings.Replace(config.Language, "_", "-", -1)
+	config.Language = strings.ReplaceAll(config.Language, "_", "-")
 
-	conf := model.SettingResponse[any]{
-		Config:            config,
+	conf := model.SettingResponse{
+		Config: model.Setting{
+			ConfigForGuests:                config.ConfigForGuests,
+			ConfigDashboard:                config.ConfigDashboard,
+			IgnoredIPNotificationServerIDs: config.IgnoredIPNotificationServerIDs,
+			Oauth2Providers:                config.Oauth2Providers,
+		},
 		Version:           singleton.Version,
 		FrontendTemplates: singleton.FrontendTemplates,
 	}
 
 	if !authorized || !isAdmin {
-		configForGuests := model.ConfigForGuests{
-			Language:            config.Language,
-			SiteName:            config.SiteName,
-			CustomCode:          config.CustomCode,
-			CustomCodeDashboard: config.CustomCodeDashboard,
-			Oauth2Providers:     config.Oauth2Providers,
-		}
+		configForGuests := config.ConfigForGuests
+		var configDashboard model.ConfigDashboard
 		if authorized {
-			configForGuests.TLS = singleton.Conf.TLS
-			configForGuests.InstallHost = singleton.Conf.InstallHost
+			configDashboard.AgentTLS = singleton.Conf.AgentTLS
+			configDashboard.InstallHost = singleton.Conf.InstallHost
 		}
-		conf = model.SettingResponse[any]{
-			Config: configForGuests,
+		conf = model.SettingResponse{
+			Config: model.Setting{
+				ConfigForGuests: configForGuests,
+				ConfigDashboard: configDashboard,
+				Oauth2Providers: config.Oauth2Providers,
+			},
 		}
 	}
 
-	return conf, nil
+	return &conf, nil
 }
 
 // Edit config
@@ -85,7 +89,7 @@ func updateConfig(c *gin.Context) (any, error) {
 		return nil, errors.New("invalid user template")
 	}
 
-	singleton.Conf.Language = strings.Replace(sf.Language, "-", "_", -1)
+	singleton.Conf.Language = strings.ReplaceAll(sf.Language, "-", "_")
 
 	singleton.Conf.EnableIPChangeNotification = sf.EnableIPChangeNotification
 	singleton.Conf.EnablePlainIPInNotification = sf.EnablePlainIPInNotification
@@ -97,15 +101,15 @@ func updateConfig(c *gin.Context) (any, error) {
 	singleton.Conf.DNSServers = sf.DNSServers
 	singleton.Conf.CustomCode = sf.CustomCode
 	singleton.Conf.CustomCodeDashboard = sf.CustomCodeDashboard
-	singleton.Conf.RealIPHeader = sf.RealIPHeader
-	singleton.Conf.TLS = sf.TLS
+	singleton.Conf.WebRealIPHeader = sf.WebRealIPHeader
+	singleton.Conf.AgentRealIPHeader = sf.AgentRealIPHeader
+	singleton.Conf.AgentTLS = sf.AgentTLS
 	singleton.Conf.UserTemplate = sf.UserTemplate
 
 	if err := singleton.Conf.Save(); err != nil {
 		return nil, newGormError("%v", err)
 	}
 
-	singleton.OnNameserverUpdate()
 	singleton.OnUpdateLang(singleton.Conf.Language)
 	return nil, nil
 }

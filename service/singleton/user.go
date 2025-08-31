@@ -1,9 +1,11 @@
 package singleton
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/nezhahq/nezha/model"
+	"github.com/nezhahq/nezha/pkg/utils"
 	"gorm.io/gorm"
 )
 
@@ -29,6 +31,13 @@ func initUser() {
 	AgentSecretToUserId[Conf.AgentSecretKey] = 0
 
 	for _, u := range users {
+		if u.AgentSecret == "" {
+			u.AgentSecret = utils.MustGenerateRandomString(model.DefaultAgentSecretLength)
+			if err := DB.Save(&u).Error; err != nil {
+				panic(fmt.Errorf("update of user %d failed: %v", u.ID, err))
+			}
+		}
+
 		UserInfoMap[u.ID] = model.UserInfo{
 			Role:        u.Role,
 			AgentSecret: u.AgentSecret,
@@ -52,7 +61,7 @@ func OnUserUpdate(u *model.User) {
 	AgentSecretToUserId[u.AgentSecret] = u.ID
 }
 
-func OnUserDelete(id []uint64, errorFunc func(string, ...interface{}) error) error {
+func OnUserDelete(id []uint64, errorFunc func(string, ...any) error) error {
 	UserLock.Lock()
 	defer UserLock.Unlock()
 
@@ -65,12 +74,11 @@ func OnUserDelete(id []uint64, errorFunc func(string, ...interface{}) error) err
 		crons, servers []uint64
 	)
 
+	slist := ServerShared.GetSortedList()
+	clist := CronShared.GetSortedList()
 	for _, uid := range id {
 		err := DB.Transaction(func(tx *gorm.DB) error {
-			CronLock.RLock()
-			crons = model.FindByUserID(CronList, uid)
-			CronLock.RUnlock()
-
+			crons = model.FindByUserID(clist, uid)
 			cron = len(crons) > 0
 			if cron {
 				if err := tx.Unscoped().Delete(&model.Cron{}, "id in (?)", crons).Error; err != nil {
@@ -78,10 +86,7 @@ func OnUserDelete(id []uint64, errorFunc func(string, ...interface{}) error) err
 				}
 			}
 
-			SortedServerLock.RLock()
-			servers = model.FindByUserID(SortedServerList, uid)
-			SortedServerLock.RUnlock()
-
+			servers = model.FindByUserID(slist, uid)
 			server = len(servers) > 0
 			if server {
 				if err := tx.Unscoped().Delete(&model.Server{}, "id in (?)", servers).Error; err != nil {
@@ -107,7 +112,7 @@ func OnUserDelete(id []uint64, errorFunc func(string, ...interface{}) error) err
 		}
 
 		if cron {
-			OnDeleteCron(crons)
+			CronShared.Delete(crons)
 		}
 
 		if server {
@@ -122,21 +127,12 @@ func OnUserDelete(id []uint64, errorFunc func(string, ...interface{}) error) err
 				}
 			}
 			AlertsLock.Unlock()
-			OnServerDelete(servers)
+			ServerShared.Delete(servers)
 		}
 
 		secret := UserInfoMap[uid].AgentSecret
 		delete(AgentSecretToUserId, secret)
 		delete(UserInfoMap, uid)
 	}
-
-	if cron {
-		UpdateCronList()
-	}
-
-	if server {
-		ReSortServer()
-	}
-
 	return nil
 }

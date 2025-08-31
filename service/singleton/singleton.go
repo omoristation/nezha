@@ -2,13 +2,18 @@ package singleton
 
 import (
 	_ "embed"
+	"iter"
 	"log"
+	"maps"
+	"slices"
+	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
-	"gopkg.in/yaml.v3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"sigs.k8s.io/yaml"
 
 	"github.com/nezhahq/nezha/model"
 	"github.com/nezhahq/nezha/pkg/utils"
@@ -17,63 +22,65 @@ import (
 var Version = "debug"
 
 var (
-	Conf              *model.Config
 	Cache             *cache.Cache
 	DB                *gorm.DB
 	Loc               *time.Location
 	FrontendTemplates []model.FrontendTemplate
 	DashboardBootTime = uint64(time.Now().Unix())
+
+	ServerShared          *ServerClass
+	ServiceSentinelShared *ServiceSentinel
+	DDNSShared            *DDNSClass
+	NotificationShared    *NotificationClass
+	NATShared             *NATClass
+	CronShared            *CronClass
 )
 
 //go:embed frontend-templates.yaml
 var frontendTemplatesYAML []byte
 
-func InitTimezoneAndCache() {
+func InitTimezoneAndCache() error {
 	var err error
 	Loc, err = time.LoadLocation(Conf.Location)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	Cache = cache.New(5*time.Minute, 10*time.Minute)
+	return nil
 }
 
 // LoadSingleton 加载子服务并执行
-func LoadSingleton() {
-	initUser()          // 加载用户ID绑定表
-	initI18n()          // 加载本地化服务
-	loadNotifications() // 加载通知服务
-	loadServers()       // 加载服务器列表
-	loadCronTasks()     // 加载定时任务
-	initNAT()
-	initDDNS()
+func LoadSingleton(bus chan<- *model.Service) (err error) {
+	initI18n() // 加载本地化服务
+	initUser() // 加载用户ID绑定表
+	NATShared = NewNATClass()
+	DDNSShared = NewDDNSClass()
+	NotificationShared = NewNotificationClass()
+	ServerShared = NewServerClass()
+	CronShared = NewCronClass()
+	// 最后初始化 ServiceSentinel
+	ServiceSentinelShared, err = NewServiceSentinel(bus)
+	return
 }
 
 // InitFrontendTemplates 从内置文件中加载FrontendTemplates
-func InitFrontendTemplates() {
+func InitFrontendTemplates() error {
 	err := yaml.Unmarshal(frontendTemplatesYAML, &FrontendTemplates)
 	if err != nil {
-		panic(err)
+		return err
 	}
-}
-
-// InitConfigFromPath 从给出的文件路径中加载配置
-func InitConfigFromPath(path string) {
-	Conf = &model.Config{}
-	err := Conf.Read(path, FrontendTemplates)
-	if err != nil {
-		panic(err)
-	}
+	return nil
 }
 
 // InitDBFromPath 从给出的文件路径中加载数据库
-func InitDBFromPath(path string) {
+func InitDBFromPath(path string) error {
 	var err error
 	DB, err = gorm.Open(sqlite.Open(path), &gorm.Config{
 		CreateBatchSize: 200,
 	})
 	if err != nil {
-		panic(err)
+		return err
 	}
 	if Conf.Debug {
 		DB = DB.Debug()
@@ -84,35 +91,43 @@ func InitDBFromPath(path string) {
 		model.NAT{}, model.DDNSProfile{}, model.NotificationGroupNotification{},
 		model.WAF{}, model.Oauth2Bind{})
 	if err != nil {
-		panic(err)
+		return err
 	}
+	return nil
 }
 
 // RecordTransferHourlyUsage 对流量记录进行打点
-func RecordTransferHourlyUsage() {
-	ServerLock.Lock()
-	defer ServerLock.Unlock()
+func RecordTransferHourlyUsage(servers ...*model.Server) {
 	now := time.Now()
 	nowTrimSeconds := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+
 	var txs []model.Transfer
-	for id, server := range ServerList {
+	var slist iter.Seq[*model.Server]
+	if len(servers) > 0 {
+		slist = slices.Values(servers)
+	} else {
+		slist = utils.Seq2To1(ServerShared.Range)
+	}
+
+	for server := range slist {
 		tx := model.Transfer{
-			ServerID: id,
-			In:       utils.Uint64SubInt64(server.State.NetInTransfer, server.PrevTransferInSnapshot),
-			Out:      utils.Uint64SubInt64(server.State.NetOutTransfer, server.PrevTransferOutSnapshot),
+			ServerID: server.ID,
+			In:       utils.SubUintChecked(server.State.NetInTransfer, server.PrevTransferInSnapshot),
+			Out:      utils.SubUintChecked(server.State.NetOutTransfer, server.PrevTransferOutSnapshot),
 		}
 		if tx.In == 0 && tx.Out == 0 {
 			continue
 		}
-		server.PrevTransferInSnapshot = int64(server.State.NetInTransfer)
-		server.PrevTransferOutSnapshot = int64(server.State.NetOutTransfer)
+		server.PrevTransferInSnapshot = server.State.NetInTransfer
+		server.PrevTransferOutSnapshot = server.State.NetOutTransfer
 		tx.CreatedAt = nowTrimSeconds
 		txs = append(txs, tx)
 	}
+
 	if len(txs) == 0 {
 		return
 	}
-	log.Println("NEZHA>> Cron 流量统计入库", len(txs), DB.Create(txs).Error)
+	log.Printf("NEZHA>> Saved traffic metrics to database. Affected %d row(s), Error: %v", len(txs), DB.Create(txs).Error)
 }
 
 // CleanServiceHistory 清理无效或过时的 监控记录 和 流量记录
@@ -170,4 +185,59 @@ func IPDesensitize(ip string) string {
 		return ip
 	}
 	return utils.IPDesensitize(ip)
+}
+
+type class[K comparable, V model.CommonInterface] struct {
+	list   map[K]V
+	listMu sync.RWMutex
+
+	sortedList   []V
+	sortedListMu sync.RWMutex
+}
+
+func (c *class[K, V]) Get(id K) (s V, ok bool) {
+	c.listMu.RLock()
+	defer c.listMu.RUnlock()
+
+	s, ok = c.list[id]
+	return
+}
+
+func (c *class[K, V]) GetList() map[K]V {
+	c.listMu.RLock()
+	defer c.listMu.RUnlock()
+
+	return maps.Clone(c.list)
+}
+
+func (c *class[K, V]) GetSortedList() []V {
+	c.sortedListMu.RLock()
+	defer c.sortedListMu.RUnlock()
+
+	return slices.Clone(c.sortedList)
+}
+
+func (c *class[K, V]) Range(fn func(k K, v V) bool) {
+	c.listMu.RLock()
+	defer c.listMu.RUnlock()
+
+	for k, v := range c.list {
+		if !fn(k, v) {
+			break
+		}
+	}
+}
+
+func (c *class[K, V]) CheckPermission(ctx *gin.Context, idList iter.Seq[K]) bool {
+	c.listMu.RLock()
+	defer c.listMu.RUnlock()
+
+	for id := range idList {
+		if s, ok := c.list[id]; ok {
+			if !s.HasPermission(ctx) {
+				return false
+			}
+		}
+	}
+	return true
 }

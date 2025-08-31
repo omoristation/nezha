@@ -36,19 +36,19 @@ func addCycleTransferStatsInfo(alert *model.AlertRule) {
 	if !alert.Enabled() {
 		return
 	}
-	for j := 0; j < len(alert.Rules); j++ {
-		if !alert.Rules[j].IsTransferDurationRule() {
+	for _, rule := range alert.Rules {
+		if !rule.IsTransferDurationRule() {
 			continue
 		}
 		if AlertsCycleTransferStatsStore[alert.ID] == nil {
-			from := alert.Rules[j].GetTransferDurationStart()
-			to := alert.Rules[j].GetTransferDurationEnd()
+			from := rule.GetTransferDurationStart()
+			to := rule.GetTransferDurationEnd()
 			AlertsCycleTransferStatsStore[alert.ID] = &model.CycleTransferStats{
 				Name:       alert.Name,
 				From:       from,
 				To:         to,
-				Max:        uint64(alert.Rules[j].Max),
-				Min:        uint64(alert.Rules[j].Min),
+				Max:        uint64(rule.Max),
+				Min:        uint64(rule.Min),
 				ServerName: make(map[uint64]string),
 				Transfer:   make(map[uint64]uint64),
 				NextUpdate: make(map[uint64]time.Time),
@@ -74,20 +74,19 @@ func AlertSentinelStart() {
 	AlertsLock.Unlock()
 
 	time.Sleep(time.Second * 10)
-	var lastPrint time.Time
+	lastPrint := time.Now()
 	var checkCount uint64
-	for {
-		startedAt := time.Now()
+	ticker := time.Tick(3 * time.Second) // 3秒钟检查一次
+	for startedAt := range ticker {
 		checkStatus()
 		checkCount++
 		if lastPrint.Before(startedAt.Add(-1 * time.Hour)) {
 			if Conf.Debug {
-				log.Println("NEZHA>> 报警规则检测每小时", checkCount, "次", startedAt, time.Now())
+				log.Printf("NEZHA>> Checking alert rules %d times each hour %v %v", checkCount, startedAt, time.Now())
 			}
 			checkCount = 0
 			lastPrint = startedAt
 		}
-		time.Sleep(time.Until(startedAt.Add(time.Second * 3))) // 3秒钟检查一次
 	}
 }
 
@@ -97,7 +96,7 @@ func OnRefreshOrAddAlert(alert *model.AlertRule) {
 	delete(alertsStore, alert.ID)
 	delete(alertsPrevState, alert.ID)
 	var isEdit bool
-	for i := 0; i < len(Alerts); i++ {
+	for i := range Alerts {
 		if Alerts[i].ID == alert.ID {
 			Alerts[i] = alert
 			isEdit = true
@@ -133,25 +132,24 @@ func OnDeleteAlert(id []uint64) {
 func checkStatus() {
 	AlertsLock.RLock()
 	defer AlertsLock.RUnlock()
-	ServerLock.RLock()
-	defer ServerLock.RUnlock()
+	m := ServerShared.GetList()
 
 	for _, alert := range Alerts {
 		// 跳过未启用
 		if !alert.Enabled() {
 			continue
 		}
-		for _, server := range ServerList {
+		for _, server := range m {
 			// 监测点
 			UserLock.RLock()
-			var role uint8
-			if u, ok := UserInfoMap[server.UserID]; !ok {
+			var role model.Role
+			if u, ok := UserInfoMap[alert.UserID]; !ok {
 				role = model.RoleMember
 			} else {
 				role = u.Role
 			}
 			UserLock.RUnlock()
-			if alert.UserID != server.UserID && role != model.RoleAdmin {
+			if alert.UserID != server.UserID && !role.IsAdmin() {
 				continue
 			}
 			alertsStore[alert.ID][server.ID] = append(alertsStore[alert.
@@ -169,26 +167,27 @@ func checkStatus() {
 					alertsPrevState[alert.ID][server.ID] = _RuleCheckFail
 					message := fmt.Sprintf("[%s] %s(%s) %s", Localizer.T("Incident"),
 						server.Name, IPDesensitize(server.GeoIP.IP.Join()), alert.Name)
-					go SendTriggerTasks(alert.FailTriggerTasks, curServer.ID)
-					go SendNotification(alert.NotificationGroupID, message, NotificationMuteLabel.ServerIncident(server.ID, alert.ID), &curServer)
+					go CronShared.SendTriggerTasks(alert.FailTriggerTasks, curServer.ID)
+					go NotificationShared.SendNotification(alert.NotificationGroupID, message, NotificationMuteLabel.ServerIncident(server.ID, alert.ID), &curServer)
 					// 清除恢复通知的静音缓存
-					UnMuteNotification(alert.NotificationGroupID, NotificationMuteLabel.ServerIncidentResolved(server.ID, alert.ID))
+					NotificationShared.UnMuteNotification(alert.NotificationGroupID, NotificationMuteLabel.ServerIncidentResolved(server.ID, alert.ID))
 				}
 			} else {
 				// 本次通过检查但上一次的状态为失败，则发送恢复通知
 				if alertsPrevState[alert.ID][server.ID] == _RuleCheckFail {
 					message := fmt.Sprintf("[%s] %s(%s) %s", Localizer.T("Resolved"),
 						server.Name, IPDesensitize(server.GeoIP.IP.Join()), alert.Name)
-					go SendTriggerTasks(alert.RecoverTriggerTasks, curServer.ID)
-					go SendNotification(alert.NotificationGroupID, message, NotificationMuteLabel.ServerIncidentResolved(server.ID, alert.ID), &curServer)
+					go CronShared.SendTriggerTasks(alert.RecoverTriggerTasks, curServer.ID)
+					go NotificationShared.SendNotification(alert.NotificationGroupID, message, NotificationMuteLabel.ServerIncidentResolved(server.ID, alert.ID), &curServer)
 					// 清除失败通知的静音缓存
-					UnMuteNotification(alert.NotificationGroupID, NotificationMuteLabel.ServerIncident(server.ID, alert.ID))
+					NotificationShared.UnMuteNotification(alert.NotificationGroupID, NotificationMuteLabel.ServerIncident(server.ID, alert.ID))
 				}
 				alertsPrevState[alert.ID][server.ID] = _RuleCheckPass
 			}
 			// 清理旧数据
 			if max > 0 && max < len(alertsStore[alert.ID][server.ID]) {
-				alertsStore[alert.ID][server.ID] = alertsStore[alert.ID][server.ID][len(alertsStore[alert.ID][server.ID])-max:]
+				index := len(alertsStore[alert.ID][server.ID]) - max
+				alertsStore[alert.ID][server.ID] = alertsStore[alert.ID][server.ID][index:]
 			}
 		}
 	}
