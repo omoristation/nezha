@@ -20,6 +20,7 @@ import (
 
 	"github.com/nezhahq/nezha/model"
 	"github.com/nezhahq/nezha/pkg/utils"
+	"github.com/nezhahq/nezha/pkg/geoip" //diy
 )
 
 var Version = "debug"
@@ -112,7 +113,7 @@ func InitDBFromPath(path string) error {
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxIdleConns(Conf.DB.MaxIdleConns)
+	sqlDB.SetMaxIdleConns(Conf.DB.MaxIdleConns) //diy
 	sqlDB.SetMaxOpenConns(Conf.DB.MaxOpenConns)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
@@ -123,6 +124,11 @@ func InitDBFromPath(path string) error {
 		model.WAF{}, model.Oauth2Bind{})
 	if err != nil {
 		return err
+	}
+	//diy 初始化 GeoIP 数据库
+	err = geoip.Init(Conf.DB.Geoip)
+	if err != nil {
+		log.Printf("GeoIP init failed: ", err)
 	}
 
 	return nil

@@ -48,19 +48,6 @@ type ConfigDashboard struct {
 	DNSServers string `koanf:"dns_servers" json:"dns_servers,omitempty"`
 }
 
-type DBConf struct {
-	Type     string `koanf:"type" json:"type,omitempty"` //diy sqlite, mysql, postgres
-	Host     string `koanf:"host" json:"host,omitempty"`
-	Port     uint16 `koanf:"port" json:"port,omitempty"`
-	User     string `koanf:"user" json:"user,omitempty"`
-	Password string `koanf:"password" json:"password,omitempty"`
-	DBName   string `koanf:"dbname" json:"dbname,omitempty"`
-	SSLMode  string `koanf:"sslmode" json:"sslmode,omitempty"` // for postgres
-
-	MaxIdleConns int `koanf:"max_idle_conns" json:"max_idle_conns,omitempty"`
-	MaxOpenConns int `koanf:"max_open_conns" json:"max_open_conns,omitempty"`
-}
-
 type Config struct {
 	ConfigForGuests
 	ConfigDashboard
@@ -102,7 +89,21 @@ type HTTPSConf struct {
 	TLSCertPath string `koanf:"tls_cert_path" json:"tls_cert_path,omitempty"`
 	TLSKeyPath  string `koanf:"tls_key_path" json:"tls_key_path,omitempty"`
 }
+//diy 数据库配置
+type DBConf struct {
+	Type     string `koanf:"type" json:"type,omitempty"` //diy sqlite, mysql, postgres
+	Host     string `koanf:"host" json:"host,omitempty"`
+	Port     uint16 `koanf:"port" json:"port,omitempty"`
+	User     string `koanf:"user" json:"user,omitempty"`
+	Password string `koanf:"password" json:"password,omitempty"`
+	DBName   string `koanf:"dbname" json:"dbname,omitempty"`
+	SSLMode  string `koanf:"sslmode" json:"sslmode,omitempty"` // for postgres
 
+	MaxIdleConns int `koanf:"max_idle_conns" json:"max_idle_conns,omitempty"`
+	MaxOpenConns int `koanf:"max_open_conns" json:"max_open_conns,omitempty"`
+
+	Geoip  string `koanf:"geoip" json:"geoip,omitempty"` //geoip数据库文件路径
+}
 // TSDBConf TSDB 配置
 type TSDBConf struct {
 	DataPath                 string  `koanf:"data_path" json:"data_path,omitempty"`
