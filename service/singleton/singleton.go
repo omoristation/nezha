@@ -2,7 +2,7 @@ package singleton
 
 import (
 	_ "embed"
-	"fmt"
+	"fmt" //diy
 	"iter"
 	"log"
 	"maps"
@@ -12,8 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
+	"gorm.io/driver/mysql" //diy
+	"gorm.io/driver/postgres" //diy
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"sigs.k8s.io/yaml"
@@ -76,10 +76,10 @@ func InitFrontendTemplates() error {
 	return nil
 }
 
-// InitDBFromPath 从配置或给出的文件路径中加载数据库
+//diy InitDBFromPath 从配置或给出的文件路径中加载数据库
 func InitDBFromPath(path string) error {
 	var err error
-	var dialector gorm.Dialector
+	var dialector gorm.Dialector //diy
 
 	switch Conf.DB.Type {
 	case "mysql":
@@ -97,6 +97,7 @@ func InitDBFromPath(path string) error {
 		dialector = sqlite.Open(path)
 	}
 
+	//DB, err = gorm.Open(sqlite.Open(path), &gorm.Config{ //diy
 	DB, err = gorm.Open(dialector, &gorm.Config{
 		CreateBatchSize: 200,
 	})
@@ -107,7 +108,7 @@ func InitDBFromPath(path string) error {
 		DB = DB.Debug()
 	}
 
-	sqlDB, err := DB.DB()
+	sqlDB, err := DB.DB() //diy
 	if err != nil {
 		return err
 	}
@@ -117,12 +118,13 @@ func InitDBFromPath(path string) error {
 
 	err = DB.AutoMigrate(model.Server{}, model.User{}, model.ServerGroup{}, model.NotificationGroup{},
 		model.Notification{}, model.AlertRule{}, model.Service{}, model.NotificationGroupNotification{},
-		model.ServiceHistory{}, model.Cron{}, model.Transfer{}, model.ServerGroupServer{},
+		model.Cron{}, model.Transfer{}, model.ServerGroupServer{},
 		model.NAT{}, model.DDNSProfile{}, model.NotificationGroupNotification{},
 		model.WAF{}, model.Oauth2Bind{})
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -160,14 +162,10 @@ func RecordTransferHourlyUsage(servers ...*model.Server) {
 	log.Printf("NEZHA>> Saved traffic metrics to database. Affected %d row(s), Error: %v", len(txs), DB.Create(txs).Error)
 }
 
-// CleanServiceHistory 清理无效或过时的 监控记录 和 流量记录
-func CleanServiceHistory() {
-	DB.Unscoped().Delete(&model.ServiceHistory{}, "created_at < ? OR service_id NOT IN (SELECT id FROM services)", time.Now().AddDate(0, 0, -30))
-	// 由于网络监控记录的数据较多，并且前端仅使用了 1 天的数据
-	// 考虑到 sqlite 数据量问题，仅保留一天数据，
-	// server_id = 0 的数据会用于/service页面的可用性展示
-	DB.Unscoped().Delete(&model.ServiceHistory{}, "(created_at < ? AND server_id != 0) OR service_id NOT IN (SELECT id FROM services)", time.Now().AddDate(0, 0, -1))
-	DB.Unscoped().Delete(&model.Transfer{}, "server_id NOT IN (SELECT id FROM servers)")
+// CleanMonitorHistory 清理流量记录（TSDB 有自己的保留策略）
+func CleanMonitorHistory() {
+	// 清理已被删除的服务器的流量记录
+	DB.Unscoped().Delete(&model.Transfer{}, "server_id NOT IN (SELECT `id` FROM servers)")
 	// 计算可清理流量记录的时长
 	var allServerKeep time.Time
 	specialServerKeep := make(map[uint64]time.Time)
@@ -199,13 +197,35 @@ func CleanServiceHistory() {
 		}
 	}
 	for id, couldRemove := range specialServerKeep {
-		DB.Unscoped().Delete(&model.Transfer{}, "server_id = ? AND created_at < ?", id, couldRemove)
+		DB.Unscoped().Delete(&model.Transfer{}, "server_id = ? AND datetime(`created_at`) < datetime(?)", id, couldRemove)
 	}
 	if allServerKeep.IsZero() {
 		DB.Unscoped().Delete(&model.Transfer{}, "server_id NOT IN (?)", specialServerIDs)
 	} else {
-		DB.Unscoped().Delete(&model.Transfer{}, "server_id NOT IN (?) AND created_at < ?", specialServerIDs, allServerKeep)
+		DB.Unscoped().Delete(&model.Transfer{}, "server_id NOT IN (?) AND datetime(`created_at`) < datetime(?)", specialServerIDs, allServerKeep)
 	}
+}
+
+// PerformMaintenance 执行系统维护（SQLite VACUUM 和 TSDB 维护）
+func PerformMaintenance() {
+	log.Println("NEZHA>> Starting system maintenance...")
+
+	// 1. SQLite 维护
+	if DB != nil {
+		log.Println("NEZHA>> SQLite: Starting VACUUM...")
+		if err := DB.Exec("VACUUM").Error; err != nil {
+			log.Printf("NEZHA>> SQLite: VACUUM failed: %v", err)
+		} else {
+			log.Println("NEZHA>> SQLite: VACUUM completed")
+		}
+	}
+
+	// 2. TSDB 维护
+	if TSDBEnabled() {
+		TSDBShared.Maintenance()
+	}
+
+	log.Println("NEZHA>> System maintenance completed")
 }
 
 // IPDesensitize 根据设置选择是否对IP进行打码处理 返回处理后的IP(关闭打码则返回原IP)

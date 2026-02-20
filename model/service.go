@@ -51,17 +51,18 @@ type Service struct {
 	Name                string `json:"name"`
 	Type                uint8  `json:"type"`
 	Target              string `json:"target"`
-	SkipServersRaw      string `gorm:"type:longtext" json:"-"`
+	SkipServersRaw      string `json:"-"`
 	Duration            uint64 `json:"duration"`
+	DisplayIndex        int    `json:"display_index"` // 展示排序，越大越靠前
 	Notify              bool   `json:"notify,omitempty"`
 	NotificationGroupID uint64 `json:"notification_group_id"` // 当前服务监控所属的通知组 ID
 	Cover               uint8  `json:"cover"`
 
 	EnableTriggerTask      bool   `gorm:"default: false" json:"enable_trigger_task,omitempty"`
 	EnableShowInService    bool   `gorm:"default: false" json:"enable_show_in_service,omitempty"`
-	//FailTriggerTasksRaw    string `gorm:"default:'[]';type:longtext" json:"-"` //diy
+	//FailTriggerTasksRaw    string `gorm:"default:'[]'" json:"-"` //diy
 	FailTriggerTasksRaw   string `gorm:"type:longtext"`
-	//RecoverTriggerTasksRaw string `gorm:"default:'[]';type:longtext" json:"-"` //diy
+	//RecoverTriggerTasksRaw string `gorm:"default:'[]'" json:"-"` //diy
 	RecoverTriggerTasksRaw string `gorm:"type:longtext"`
 
 	FailTriggerTasks    []uint64 `gorm:"-" json:"fail_trigger_tasks"`    // 失败时执行的触发任务id

@@ -10,7 +10,7 @@ import (
 	"github.com/nezhahq/nezha/model"
 )
 
-// Migrate 将 SQLite 数据迁移到当前配置的数据库
+//diy Migrate 将 SQLite 数据迁移到当前配置的数据库
 func Migrate(sqlitePath string) error {
 	if Conf.DB.Type == "sqlite" || Conf.DB.Type == "" {
 		return fmt.Errorf("目标数据库不能是 SQLite，请先在配置文件中配置 MySQL 或 PostgreSQL")

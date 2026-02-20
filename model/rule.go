@@ -96,33 +96,21 @@ func (u *Rule) Snapshot(cycleTransferStats *CycleTransferStats, server *Server, 
 		src = float64(utils.SubUintChecked(server.State.NetInTransfer, server.PrevTransferInSnapshot))
 		if u.CycleInterval != 0 {
 			var res NResult
-			quote := "`"
-			if db.Dialector.Name() == "postgres" {
-				quote = "\""
-			}
-			db.Model(&Transfer{}).Select("SUM("+quote+"in"+quote+") AS n").Where("created_at >= ? AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
+			db.Model(&Transfer{}).Select("SUM(`in`) AS n").Where("datetime(`created_at`) >= datetime(?) AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
 			src += float64(res.N)
 		}
 	case "transfer_out_cycle":
 		src = float64(utils.SubUintChecked(server.State.NetOutTransfer, server.PrevTransferOutSnapshot))
 		if u.CycleInterval != 0 {
 			var res NResult
-			quote := "`"
-			if db.Dialector.Name() == "postgres" {
-				quote = "\""
-			}
-			db.Model(&Transfer{}).Select("SUM("+quote+"out"+quote+") AS n").Where("created_at >= ? AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
+			db.Model(&Transfer{}).Select("SUM(`out`) AS n").Where("datetime(`created_at`) >= datetime(?) AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
 			src += float64(res.N)
 		}
 	case "transfer_all_cycle":
 		src = float64(utils.SubUintChecked(server.State.NetOutTransfer, server.PrevTransferOutSnapshot) + utils.SubUintChecked(server.State.NetInTransfer, server.PrevTransferInSnapshot))
 		if u.CycleInterval != 0 {
 			var res NResult
-			quote := "`"
-			if db.Dialector.Name() == "postgres" {
-				quote = "\""
-			}
-			db.Model(&Transfer{}).Select("SUM("+quote+"in"+quote+"+"+quote+"out"+quote+") AS n").Where("created_at >= ? AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
+			db.Model(&Transfer{}).Select("SUM(`in`+`out`) AS n").Where("datetime(`created_at`) >= datetime(?) AND server_id = ?", u.GetTransferDurationStart().UTC(), server.ID).Scan(&res)
 			src += float64(res.N)
 		}
 	case "load1":

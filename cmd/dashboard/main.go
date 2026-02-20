@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 	_ "time/tzdata"
@@ -32,7 +33,7 @@ type DashboardCliParam struct {
 	Version          bool   // 当前版本号
 	ConfigFile       string // 配置文件路径
 	DatabaseLocation string // Sqlite3 数据库文件路径
-	Migrate          bool   // 迁移 SQLite 数据到新的数据库
+	Migrate          bool   //diy 迁移 SQLite 数据到新的数据库
 }
 
 var (
@@ -66,8 +67,8 @@ func initSystem(bus chan<- *model.Service) error {
 		return err
 	}
 
-	// 每天的3:30 对 监控记录 和 流量记录 进行清理
-	if _, err := singleton.CronShared.AddFunc("0 30 3 * * *", singleton.CleanServiceHistory); err != nil {
+	// 每天的3:30 对流量记录进行清理
+	if _, err := singleton.CronShared.AddFunc("0 30 3 * * *", singleton.CleanMonitorHistory); err != nil {
 		return err
 	}
 
@@ -103,7 +104,7 @@ func main() {
 	flag.BoolVar(&dashboardCliParam.Version, "v", false, "查看当前版本号")
 	flag.StringVar(&dashboardCliParam.ConfigFile, "c", "data/config.yaml", "配置文件路径")
 	flag.StringVar(&dashboardCliParam.DatabaseLocation, "db", "data/sqlite.db", "Sqlite3数据库文件路径")
-	flag.BoolVar(&dashboardCliParam.Migrate, "migrate", false, "迁移 SQLite 数据到 MySQL 或 PostgreSQL (需先在 config.yaml 配置目标库)")
+	flag.BoolVar(&dashboardCliParam.Migrate, "migrate", false, "//diy迁移 SQLite 数据到 MySQL 或 PostgreSQL (需先在 config.yaml 配置目标库)")
 	flag.Parse()
 
 	if dashboardCliParam.Version {
@@ -111,21 +112,19 @@ func main() {
 		os.Exit(0)
 	}
 
-	serviceSentinelDispatchBus := make(chan *model.Service) // 用于传递服务监控任务信息的channel
-	// 初始化 dao 包
+	serviceSentinelDispatchBus := make(chan *model.Service)
 	if err := utils.FirstError(singleton.InitFrontendTemplates,
 		func() error { return singleton.InitConfigFromPath(dashboardCliParam.ConfigFile) },
 		singleton.InitTimezoneAndCache,
-		func() error { return singleton.InitDBFromPath(dashboardCliParam.DatabaseLocation) },
 		func() error {
-			if dashboardCliParam.Migrate {
-				if err := singleton.Migrate(dashboardCliParam.DatabaseLocation); err != nil {
-					return err
-				}
-				os.Exit(0)
+			if singleton.Conf.Memory.GoMemLimitMB > 0 {
+				debug.SetMemoryLimit(singleton.Conf.Memory.GoMemLimitMB * 1024 * 1024)
+				log.Printf("NEZHA>> Go memory limit set to %d MB", singleton.Conf.Memory.GoMemLimitMB)
 			}
 			return nil
 		},
+		func() error { return singleton.InitDBFromPath(dashboardCliParam.DatabaseLocation) },
+		singleton.InitTSDB,
 		func() error { return initSystem(serviceSentinelDispatchBus) }); err != nil {
 		log.Fatal(err)
 	}
@@ -135,7 +134,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	singleton.CleanServiceHistory()
+	singleton.CleanMonitorHistory()
 	rpc.DispatchKeepalive()
 	go rpc.DispatchTask(serviceSentinelDispatchBus)
 	go singleton.AlertSentinelStart()
@@ -183,6 +182,7 @@ func main() {
 	}, func(c context.Context) error {
 		log.Println("NEZHA>> Graceful::START")
 		singleton.RecordTransferHourlyUsage()
+		singleton.CloseTSDB()
 		log.Println("NEZHA>> Graceful::END")
 		var err error
 		if muxServerHTTPS != nil {

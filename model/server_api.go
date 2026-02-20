@@ -5,7 +5,7 @@ import "time"
 type StreamServer struct {
 	ID           uint64 `json:"id,omitempty"`
 	Name         string `json:"name,omitempty"`
-	Note         string `json:"note,omitempty"`          // 管理员可见备注 //diy 发送到前端的端口号
+	Note         string `json:"note,omitempty"`          //diy  管理员可见备注 发送到前端的端口号
 	PublicNote   string `json:"public_note,omitempty"`   // 公开备注，只第一个数据包有值
 	DisplayIndex int    `json:"display_index,omitempty"` // 展示排序，越大越靠前
 
